@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix="edge-pip-release-") as scratch:
     shutil.copytree(src / "build/Edge PiP.app", bundle)
     run("codesign", "--verify", "--strict", "--deep", bundle)
     for binary in (bundle / "Contents/MacOS").iterdir():
-        run("xcrun", "lipo", "-verify_arch", "arm64", "x86_64", binary)
+        run("xcrun", "lipo", binary, "-verify_arch", "arm64", "x86_64")
     (volume / "Applications").symlink_to("/Applications")
     setup = volume / "Setup"
     setup.mkdir()
