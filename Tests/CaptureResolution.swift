@@ -96,6 +96,9 @@ private final class ObservedOutput: NSObject, SCStreamOutput {
     while ContinuousClock.now < deadline {
         if player.presentIfReady(), player.panel !== preview, !preview.isVisible,
            player.panel.contentView === view, player.capture?.stream === stream {
+            guard player.panel.collectionBehavior.contains(.transient) else {
+                throw CheckFailed("Recovered PiP would overlay Edge's Mission Control preview")
+            }
             print("PASS recovered a stranded window with the original video surface")
             return
         }

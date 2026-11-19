@@ -196,7 +196,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.title = "Edge PiP Mirror"
         panel.isFloatingPanel = true
         panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        // Mission Control already shows Edge's source window in its overview.
+        panel.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .fullScreenAuxiliary, .transient, .ignoresCycle]
         panel.hidesOnDeactivate = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
@@ -215,7 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         toolbar = NSPanel(contentRect:.zero,styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
         toolbar.title = "Edge PiP Controls"
         toolbar.level = .statusBar
-        toolbar.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary,.stationary,.ignoresCycle]
+        toolbar.collectionBehavior = [.canJoinAllSpaces,.fullScreenAuxiliary,.transient,.ignoresCycle]
         toolbar.hidesOnDeactivate = false
         toolbar.isOpaque = false
         toolbar.backgroundColor = .clear
