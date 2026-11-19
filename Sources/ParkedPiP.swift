@@ -14,6 +14,7 @@ final class ParkedPiP {
     init?(source: WindowInfo) {
         guard let executable = Bundle.main.executableURL else { return nil }
         _ = fcntl(commands.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        lastSize = CGSize(width: source.frame.width.rounded(), height: source.frame.height.rounded())
         worker.executableURL = executable
         worker.arguments = ["--hold-pip", String(source.pid), String(source.id)]
         worker.standardInput = commands
@@ -131,7 +132,12 @@ final class ParkedPiP {
             if now - lastCheck > 0.4 {
                 lastCheck = now
                 guard let actual = source() else { return 0 }
-                if screens().contains(where: { $0.intersects(actual.frame) }), !move(parkingPoint()) { return 4 }
+                let displays = screens()
+                // During a swipe the compositor translates the source even when
+                // Edge has not moved it. Avoid moving Edge back to its own Space.
+                if displays.contains(where: { $0.intersects(actual.frame) }),
+                   let position = frame(window), displays.contains(where: { $0.intersects(position) }),
+                   !move(parkingPoint()) { return 4 }
             }
         }
     }

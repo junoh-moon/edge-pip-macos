@@ -79,4 +79,27 @@ private final class ObservedOutput: NSObject, SCStreamOutput {
     try await expectNativePixels(source.frame.size)
     source.setContentSize(CGSize(width: 300, height: 170))
     try await expectNativePixels(source.frame.size)
+
+    // Simulate an ordered panel stranded outside the current desktop. The
+    // WindowServer check must recover the very same live video surface.
+    guard let screen = NSScreen.main else { throw CheckFailed("Missing display") }
+    let player = AppDelegate()
+    player.panel = preview
+    player.capture = capture
+    player.presentMirror = true
+    player.savedFrame = CGRect(x: screen.visibleFrame.midX - 160, y: screen.visibleFrame.midY - 90,
+                               width: 320, height: 180)
+    let rightEdge = NSScreen.screens.map { $0.frame.maxX }.max()!
+    preview.setFrameOrigin(CGPoint(x: rightEdge + 1024, y: screen.frame.midY))
+    defer { player.panel.orderOut(nil) }
+    let deadline = ContinuousClock.now + .seconds(4)
+    while ContinuousClock.now < deadline {
+        if player.presentIfReady(), player.panel !== preview, !preview.isVisible,
+           player.panel.contentView === view, player.capture?.stream === stream {
+            print("PASS recovered a stranded window with the original video surface")
+            return
+        }
+        try await Task.sleep(for: .milliseconds(80))
+    }
+    throw CheckFailed("Could not recover the off-display video panel")
 }

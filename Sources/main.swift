@@ -43,14 +43,14 @@ extension NSScreen {
 
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     let view: VideoView
-    private var clearBlank: DispatchWorkItem?
     private var configuredPixels = CGSize.zero
     private var wantedPixels = CGSize.zero
     private var resizeTask: Task<Void, Never>?
     private(set) var lastFrameAt: TimeInterval = 0
 
-    init(view: VideoView) {
+    init(view: VideoView, hasDisplayedFrame: Bool = false) {
         self.view = view
+        self.hasFrame = hasDisplayedFrame
         super.init()
     }
     var stream: SCStream?
@@ -136,23 +136,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false),
               let info = (attachments as? [[SCStreamFrameInfo: Any]])?.first,
               let raw = info[.status] as? Int, let status = SCFrameStatus(rawValue: raw) else { return }
-        if status == .blank || status == .stopped {
-            // WindowServer briefly blanks otherwise healthy windows while sliding Spaces.
-            if clearBlank == nil {
-                let clear = DispatchWorkItem { [weak self] in
-                    guard let self, !self.cancelled else { return }
-                    self.hasFrame = false
-                    self.view.video.sampleBufferRenderer.flush(removingDisplayedImage:true, completionHandler:nil)
-                }
-                clearBlank = clear
-                DispatchQueue.main.asyncAfter(deadline:.now()+0.9,execute:clear)
-            }
-            return
-        }
+        // Keep the last ordinary frame during a Space transition. Ending the session
+        // or switching to protected playback detaches and clears the display layer.
         guard status == .complete, sample.imageBuffer != nil else { return }
         followSourceResolution(info, stream: stream)
-        clearBlank?.cancel()
-        clearBlank=nil
         let renderer = view.video.sampleBufferRenderer
         if renderer.requiresFlushToResumeDecoding { renderer.flush() }
         guard renderer.isReadyForMoreMediaData else { return }
@@ -173,7 +160,6 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() {
         cancelled = true
         resizeTask?.cancel()
-        clearBlank?.cancel()
         onFrame = nil; onStop = nil
         if let stream, !starting { Task { try? await stream.stopCapture() } }
     }
@@ -205,8 +191,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var allowed = false
     var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .resizable, .nonactivatingPanel], backing: .buffered, defer: false)
+    private func makeVideoPanel(frame: NSRect) -> NSPanel {
+        let panel = NSPanel(contentRect: frame, styleMask: [.borderless, .resizable, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Edge PiP Mirror"
         panel.isFloatingPanel = true
         panel.level = .statusBar
@@ -221,6 +207,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.delegate = self
         panel.becomesKeyOnlyIfNeeded = true
         panel.animationBehavior = .none
+        return panel
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        panel = makeVideoPanel(frame: .zero)
         toolbar = NSPanel(contentRect:.zero,styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
         toolbar.title = "Edge PiP Controls"
         toolbar.level = .statusBar
@@ -266,6 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification,
                 object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
+            if self.offDisplaySince != nil { self.offDisplaySince = self.now }
             self.tick()
             self.settle?.cancel()
             let settled = DispatchWorkItem { [weak self] in
@@ -275,7 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // Restart only a stalled stream. Both streams use the same surface,
                 // so the last frame remains on screen until the new stream delivers.
                 capture.stop()
-                self.beginCapture(pip,screen:screen,reusing:capture.view)
+                self.beginCapture(pip,screen:screen,reusing:capture)
 
             }
             self.settle = settled
@@ -331,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let visible = presentIfReady()
                 if !visible {
                     if offDisplaySince == nil { offDisplaySince = now }
-                    if now - (offDisplaySince ?? now) >= 0.7 {
+                    if now - (offDisplaySince ?? now) >= 2 {
                         held.restore()
                         parked = nil
                         parkAgainAfter = now + 1.2
@@ -431,9 +423,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             toolbarControls.refreshHover()
         }
     }
-    func beginCapture(_ pip:WindowInfo, screen:NSScreen, reusing view:VideoView?=nil) {
+    func beginCapture(_ pip:WindowInfo, screen:NSScreen, reusing previous:Capture?=nil) {
         guard !captureGuard.isBlockingCapture else { tick(); return }
-        let capture=Capture(view:view ?? VideoView(frame:.zero))
+        let capture=Capture(view:previous?.view ?? VideoView(frame:.zero), hasDisplayedFrame:previous?.hasFrame == true)
         self.capture=capture
         if savedFrame == nil {
             let safe=screen.visibleFrame.insetBy(dx:12,dy:12)
@@ -480,28 +472,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.orderFrontRegardless()
             capture.view.refreshHover()
         }
-        let id = CGWindowID(panel.windowNumber)
-        let rows = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]]
-        if let row = rows?.first, row[kCGWindowIsOnscreen as String] as? Bool == true,
-           let window = WindowInfo(row), screen.quartzBounds.insetBy(dx: -4, dy: -4).contains(window.frame) {
-            offDisplaySince = nil
-            message(parked?.ready == true ? "모든 데스크톱에 Edge PiP 표시 중" : "현재 데스크톱에 PiP 표시 중")
-            return true
-        }
-        if offDisplaySince == nil { offDisplaySince = now }
-        if now - lastRepaired >= 0.55 {
+        if !isPresented(panel, on: screen) {
+            let missingSince = offDisplaySince ?? now
+            offDisplaySince = missingSince
+            guard now - missingSince >= 0.9, now - lastRepaired >= 1 else {
+                message("현재 데스크톱에 PiP 연결 중")
+                return false
+            }
             lastRepaired = now
-            // A panel can remain ordered on a previous full-screen Space after AppKit
-            // claims it is visible. Rejoin the current Space without activating the app.
-            let allSpaces = panel.collectionBehavior
-            panel.orderOut(nil)
-            panel.collectionBehavior = allSpaces.subtracting(.canJoinAllSpaces).union(.moveToActiveSpace)
-            panel.setFrame(target, display: true)
-            panel.orderFrontRegardless()
-            panel.collectionBehavior = allSpaces
+            // Reuse the decoded video and controls in a new all-Spaces window.
+            // Reordering the stranded window can bind it back to its original Space.
+            let previous = panel!
+            let replacement = makeVideoPanel(frame: target)
+            replacement.contentAspectRatio = previous.contentAspectRatio
+            replacement.minSize = previous.minSize
+            replacement.contentView = capture.view
+            panel = replacement
+            replacement.orderFrontRegardless()
+            previous.close()
+            capture.view.refreshHover()
+            guard isPresented(replacement, on: screen) else {
+                message("현재 데스크톱에 PiP 연결 중")
+                return false
+            }
         }
-        message("현재 데스크톱에 PiP 연결 중")
-        return false
+        offDisplaySince = nil
+        message(parked?.ready == true ? "모든 데스크톱에 Edge PiP 표시 중" : "현재 데스크톱에 PiP 표시 중")
+        return true
+    }
+
+    private func isPresented(_ window: NSWindow, on screen: NSScreen) -> Bool {
+        let rows = CGWindowListCopyWindowInfo(.optionIncludingWindow, CGWindowID(window.windowNumber)) as? [[String: Any]]
+        guard let row = rows?.first, row[kCGWindowIsOnscreen as String] as? Bool == true,
+              let info = WindowInfo(row) else { return false }
+        return screen.quartzBounds.insetBy(dx: -4, dy: -4).contains(info.frame)
     }
     private func fitted(_ frame: NSRect, to bounds: NSRect) -> NSRect {
         let factor = min(1, bounds.width / frame.width, bounds.height / frame.height)
@@ -531,6 +535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.capture = nil
         panel.orderOut(nil)
         capture.stop()
+        capture.view.video.sampleBufferRenderer.flush(removingDisplayedImage:true, completionHandler:nil)
         panel.contentView = nil
     }
     func reset() {
