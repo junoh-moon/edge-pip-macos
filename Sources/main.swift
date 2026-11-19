@@ -208,9 +208,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .resizable, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Edge PiP Mirror"
-        panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.hidesOnDeactivate = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
@@ -328,7 +328,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else if held.ready {
                 presentMirror = true
                 toolbar.orderOut(nil)
-                presentIfReady()
+                let visible = presentIfReady()
+                if !visible {
+                    if offDisplaySince == nil { offDisplaySince = now }
+                    if now - (offDisplaySince ?? now) >= 0.7 {
+                        held.restore()
+                        parked = nil
+                        parkAgainAfter = now + 1.2
+                        message("Edge 원래 PiP로 복귀 중")
+                    }
+                    return
+                }
                 if let size = savedFrame?.size { held.resize(to: size) }
                 capture?.view.update(media)
                 return
@@ -371,17 +381,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if needsMirror { nativeVisibleSince=nil }
         else if nativeVisibleSince==nil { nativeVisibleSince=now }
         let handingBack = presentMirror && now-(nativeVisibleSince ?? now)<0.35
-        presentMirror = needsMirror || handingBack
+        let canTakeOver = AXIsProcessTrusted() && now >= parkAgainAfter
+        presentMirror = needsMirror || handingBack || parked != nil || canTakeOver
         // Prime the first frame while Edge is still on screen. A Space handoff
         // can then display an existing frame without waiting for capture setup.
         if capture == nil && now>=retryAfter { beginCapture(pip,screen:screen) }
-        if parked == nil, AXIsProcessTrusted(), now >= parkAgainAfter, capture?.hasFrame == true {
-            parkAgainAfter = now + 1
-            parked = ParkedPiP(source: pip)
-        }
         if presentMirror {
             if toolbar.isVisible { toolbar.orderOut(nil) }
-            presentIfReady()
+            if presentIfReady(), parked == nil, canTakeOver {
+                // Keep Edge visible until the compositor has actually presented its replacement.
+                parked = ParkedPiP(source: pip)
+                if parked == nil { parkAgainAfter = now + 1 }
+            }
         } else {
             offDisplaySince=nil
             if panel.isVisible {panel.orderOut(nil)}
@@ -451,39 +462,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             catch { if self.capture === capture { self.failed() } }
         }
     }
-    func presentIfReady() {
-        guard presentMirror,let capture,capture.hasFrame else {return}
-        guard let requested = savedFrame, let screen = NSScreen.screens.max(by:{
-            $0.frame.intersection(requested).width * $0.frame.intersection(requested).height <
-            $1.frame.intersection(requested).width * $1.frame.intersection(requested).height
-        }) else { return }
-        let target = fitted(requested, to:screen.visibleFrame)
+    @discardableResult
+    func presentIfReady() -> Bool {
+        guard presentMirror, let capture, capture.hasFrame, let requested = savedFrame else { return false }
+        let screen = NSScreen.screens.max { lhs, rhs in
+            let a = lhs.frame.intersection(requested), b = rhs.frame.intersection(requested)
+            return (a.isNull ? 0 : a.width * a.height) < (b.isNull ? 0 : b.width * b.height)
+        }
+        guard let screen else { return false }
+        let target = fitted(requested, to: screen.visibleFrame)
         savedFrame = target
-        let wasHidden = panel.alphaValue == 0 || !panel.isVisible
-        if wasHidden {
-            panel.setFrame(target, display:true)
+        if NSApp.isHidden { NSApp.unhideWithoutActivation() }
+        if !panel.isVisible || panel.alphaValue == 0 {
+            panel.setFrame(target, display: true)
             panel.alphaValue = 1
             panel.ignoresMouseEvents = false
             panel.orderFrontRegardless()
             capture.view.refreshHover()
-        } else if !panel.isOnActiveSpace {
-            panel.orderFrontRegardless()
         }
-        // AppKit and WindowServer can disagree briefly during a swipe. If a
-        // finished transition stranded the panel, re-order it at the user's last
-        // chosen coordinates. WindowServer's animated coordinates are never saved.
-        let info = CGWindowListCopyWindowInfo(.optionIncludingWindow,CGWindowID(panel.windowNumber)) as? [[String:Any]]
-        if let row = info?.first, let actual = WindowInfo(row),
-           !screen.quartzBounds.insetBy(dx:-4,dy:-4).contains(actual.frame) {
-            if offDisplaySince==nil { offDisplaySince=now }
-            if now-lastRepaired>0.3 {
-                lastRepaired=now
-                if now-(offDisplaySince ?? now)>0.9 { panel.orderOut(nil) }
-                panel.setFrame(target,display:true)
-                panel.orderFrontRegardless()
-            }
-        } else { offDisplaySince=nil }
-        message(parked?.ready == true ? "모든 데스크톱에 Edge PiP 표시 중" : "전체 화면에 PIP 표시 중")
+        let id = CGWindowID(panel.windowNumber)
+        let rows = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]]
+        if let row = rows?.first, row[kCGWindowIsOnscreen as String] as? Bool == true,
+           let window = WindowInfo(row), screen.quartzBounds.insetBy(dx: -4, dy: -4).contains(window.frame) {
+            offDisplaySince = nil
+            message(parked?.ready == true ? "모든 데스크톱에 Edge PiP 표시 중" : "현재 데스크톱에 PiP 표시 중")
+            return true
+        }
+        if offDisplaySince == nil { offDisplaySince = now }
+        if now - lastRepaired >= 0.55 {
+            lastRepaired = now
+            // A panel can remain ordered on a previous full-screen Space after AppKit
+            // claims it is visible. Rejoin the current Space without activating the app.
+            let allSpaces = panel.collectionBehavior
+            panel.orderOut(nil)
+            panel.collectionBehavior = allSpaces.subtracting(.canJoinAllSpaces).union(.moveToActiveSpace)
+            panel.setFrame(target, display: true)
+            panel.orderFrontRegardless()
+            panel.collectionBehavior = allSpaces
+        }
+        message("현재 데스크톱에 PiP 연결 중")
+        return false
     }
     private func fitted(_ frame: NSRect, to bounds: NSRect) -> NSRect {
         let factor = min(1, bounds.width / frame.width, bounds.height / frame.height)
