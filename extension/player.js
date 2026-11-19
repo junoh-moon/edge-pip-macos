@@ -1,6 +1,6 @@
 (() => {
-  if (globalThis.__edgePipControlsInstalled) return;
-  globalThis.__edgePipControlsInstalled = true;
+  if (typeof globalThis.__edgePipControlsInstalled === "function" && globalThis.__edgePipControlsInstalled()) return;
+  globalThis.__edgePipControlsInstalled = () => { try { return Boolean(chrome.runtime.id); } catch { return false; } };
   let video, port, retry = 0, lastSent = 0;
   const timers = ["play", "pause", "timeupdate", "volumechange", "durationchange", "seeking", "seeked", "ratechange", "progress", "ended"];
   const current = () => {
@@ -65,7 +65,9 @@
     lastSent = performance.now();
     const ranges = video.seekable;
     const spans = Array.from({length:ranges.length}, (_, i) => [ranges.start(i), ranges.end(i)]);
-    port.postMessage({type:"state", time:video.currentTime, duration:Number.isFinite(video.duration) ? video.duration : null,
+    const protection = globalThis.__edgePipProtection;
+    const ordinaryPiP = Boolean(protection?.isProtected && !protection.isProtected(video));
+    port.postMessage({type:"state", ordinaryPiP, time:video.currentTime, duration:Number.isFinite(video.duration) ? video.duration : null,
       spans, paused:video.paused || video.ended, muted:video.muted, volume:video.volume, rate:video.playbackRate,
       previous:queue("previoustrack"), next:queue("nexttrack"), live:video.duration === Infinity, ...captions()});
   }

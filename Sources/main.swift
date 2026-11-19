@@ -3,7 +3,7 @@ import AVFoundation
 import ScreenCaptureKit
 
 private let edgeIdentifier = "com.microsoft.edgemac"
-private let pipTitles: Set<String> = {
+let pipTitles: Set<String> = {
     let url = Bundle.main.url(forResource: "PiPTitles", withExtension: "txt")
     let strings = url.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
     return Set(strings.components(separatedBy: .newlines).filter { !$0.isEmpty })
@@ -100,6 +100,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.showsCursor = false
         config.capturesAudio = false
         config.ignoreShadowsSingleWindow = true
+        config.ignoreGlobalClipSingleWindow = true
         config.captureResolution = .best
         return config
     }
@@ -182,6 +183,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let state = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     var panel: NSPanel!
+    private var parked: ParkedPiP?
+    private var parkAgainAfter: TimeInterval = 0
     private var toolbar: NSPanel!
     private let toolbarControls = VideoView(frame:.zero)
     var capture: Capture?
@@ -193,10 +196,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var offDisplaySince: TimeInterval?
     var nativeVisibleSince: TimeInterval?
     var presentMirror = false
-    var dismissedID: CGWindowID?
-    var sawDismissedOffscreen = false
-    var lastSourceWindowIDs = Set<CGWindowID>()
-    var absentSince: TimeInterval?
     var retryAfter: TimeInterval = 0
     var timer: Timer?
     var spaceObserver: NSObjectProtocol?
@@ -239,7 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         link.onState = { [weak self] state in
             guard let self else { return }
             self.capture?.view.update(state)
-            if self.source == nil { self.tick() }
+            if self.source == nil || state.useNativePiP { self.tick() }
         }
         link.onDisconnect = { [weak self] in
             self?.toolbar.orderOut(nil)
@@ -253,9 +252,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let menu = NSMenu()
         menu.addItem(state)
         menu.addItem(.separator())
+        menu.addItem(withTitle: "손쉬운 사용 권한 설정…", action: #selector(accessibilitySettings), keyEquivalent: "").target = self
         menu.addItem(withTitle: "화면 기록 권한 설정…", action: #selector(settings), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Edge PiP 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menuItem.menu = menu
+        if !AXIsProcessTrusted(), !UserDefaults.standard.bool(forKey: "askedToMovePiP") {
+            UserDefaults.standard.set(true, forKey: "askedToMovePiP")
+            _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+        }
         allowed = CGPreflightScreenCaptureAccess()
         if !allowed { allowed = CGRequestScreenCaptureAccess() }
         captureGuard.observe { [weak self] in self?.tick() }
@@ -283,6 +287,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         RunLoop.main.add(timer, forMode: .common)
         tick()
     }
+    @objc func accessibilitySettings() {
+        _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
     @objc func settings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
@@ -292,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if state.title != text { state.title = text; menuItem.button?.toolTip = text }
     }
     func tick() {
-        if captureGuard.isBlockingCapture {
+        if captureGuard.isBlockingCapture || link.state?.useNativePiP == true {
             resumeAfter = now + 0.55
             settle?.cancel()
             toolbar.orderOut(nil)
@@ -300,8 +310,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             source = nil
             presentMirror = false
             nativeVisibleSince = nil
-            absentSince = nil
-            lastSourceWindowIDs.removeAll()
             message("보호 영상 · 화면 캡처 일시 중지")
             return
         }
@@ -310,23 +318,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             allowed = CGPreflightScreenCaptureAccess()
             if !allowed { message("화면 기록 권한이 필요합니다"); return }
         }
-        let media = link.state
-        let edge = Set(NSRunningApplication.runningApplications(withBundleIdentifier: edgeIdentifier).map(\.processIdentifier))
-        guard !edge.isEmpty else { reset(); return }
+        // The extension identifies the active video. Until it does, leave Edge's own window alone.
+        guard let media = link.state, let browserPID = link.browserPID else { reset(); return }
+        if let held = parked {
+            if !held.running {
+                held.restore()
+                parked = nil
+                parkAgainAfter = now + 1
+            } else if held.ready {
+                presentMirror = true
+                toolbar.orderOut(nil)
+                presentIfReady()
+                if let size = savedFrame?.size { held.resize(to: size) }
+                capture?.view.update(media)
+                return
+            }
+        }
         let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], 0) as? [[String: Any]] ?? []
         let visible = raw.compactMap(WindowInfo.init)
         func matches(_ w: WindowInfo) -> Bool {
-            edge.contains(w.pid) && (link.browserPID == nil || w.pid == link.browserPID) &&
+            w.pid == browserPID &&
                 w.layer == CGWindowLevelForKey(.floatingWindow) && pipTitles.contains(w.title)
                 && w.frame.width > 32 && w.frame.height > 24
         }
         let native = visible.first { matches($0) && source?.id == $0.id } ?? visible.first(where:matches)
-        if let dismissedID {
-            if native?.id == dismissedID && !sawDismissedOffscreen { return }
-            if native == nil { sawDismissedOffscreen = true; return }
-            self.dismissedID = nil
-            sawDismissedOffscreen = false
-        }
         if let native, let previous=source, native.id != previous.id {
             stopCapture()
             source = native
@@ -335,7 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let all = CGWindowListCopyWindowInfo([.optionAll,.excludeDesktopElements],0) as? [[String:Any]] ?? []
             let hidden = all.compactMap(WindowInfo.init).filter(matches)
             guard let candidate = native ?? (hidden.count == 1 ? hidden.first : nil) else {
-                message(media == nil ? "Edge PIP 대기 중":"Edge 영상 창을 찾는 중"); return
+                message("Edge 영상 창을 찾는 중"); return
             }
             source = candidate
         }
@@ -352,18 +367,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let obscured = visible.prefix(while: { $0.id != pip.id }).contains {
             $0.pid != pip.pid && $0.layer == 0 && $0.frame.contains(display.insetBy(dx:4,dy:4))
         }
-        let originWindows=Set(visible.filter { $0.pid==pip.pid && $0.layer==0 && $0.frame.width>200 }.map(\.id))
-        if nativeOnDisplay && !foreignFullscreen && !obscured {
-            lastSourceWindowIDs=originWindows
-            absentSince=nil
-        } else if media==nil && native==nil {
-            let exists=CGWindowListCopyWindowInfo(.optionIncludingWindow,pip.id) as? [[String:Any]] ?? []
-            let returned = !foreignFullscreen && !lastSourceWindowIDs.isDisjoint(with:originWindows)
-            if exists.isEmpty || returned {
-                if absentSince==nil { absentSince=now }
-                if now-(absentSince ?? now)>2 { reset(); return }
-            } else { absentSince=nil }
-        }
         let needsMirror = !nativeOnDisplay || foreignFullscreen || obscured
         if needsMirror { nativeVisibleSince=nil }
         else if nativeVisibleSince==nil { nativeVisibleSince=now }
@@ -372,6 +375,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Prime the first frame while Edge is still on screen. A Space handoff
         // can then display an existing frame without waiting for capture setup.
         if capture == nil && now>=retryAfter { beginCapture(pip,screen:screen) }
+        if parked == nil, AXIsProcessTrusted(), now >= parkAgainAfter, capture?.hasFrame == true {
+            parkAgainAfter = now + 1
+            parked = ParkedPiP(source: pip)
+        }
         if presentMirror {
             if toolbar.isVisible { toolbar.orderOut(nil) }
             presentIfReady()
@@ -382,12 +389,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             panel.ignoresMouseEvents = true
             message("Edge에서 PIP 재생 중")
             if let native {
-                source = native
-                if let media { updateToolbar(for:native,on:screen,media:media) }
-                else if toolbar.isVisible { toolbar.orderOut(nil) }
+                if parked == nil { source = native }
+                updateToolbar(for:native,on:screen,media:media)
             }
         }
-        if let media, capture?.view.window != nil { capture?.view.update(media) }
+        if capture?.view.window != nil { capture?.view.update(media) }
     }
     // Keep the original window's own drag and resize handles accessible. The
     // extra controls sit against its nearest free edge and appear on hover.
@@ -435,17 +441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         if panel.contentView !== capture.view { panel.contentView=capture.view }
         capture.view.didPlace = { [weak self] in self?.rememberUserFrame() }
-        capture.view.command={ [weak self] action,value in
-            guard let self else { return }
-            if self.link.state != nil { self.link.send(action,value); return }
-            if action=="close" {
-                self.dismissedID=self.source?.id
-                self.sawDismissedOffscreen=false
-                self.reset()
-            } else if action=="return",let pid=self.source?.pid {
-                NSRunningApplication(processIdentifier:pid)?.activate(options:[.activateAllWindows])
-            }
-        }
+        capture.view.command = { [weak self] action, value in self?.link.send(action, value) }
         if let state=link.state {capture.view.update(state)} else {capture.view.showWindowControls()}
         capture.view.layoutSubtreeIfNeeded()
         capture.onFrame={ [weak self] in self?.presentIfReady() }
@@ -487,7 +483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 panel.orderFrontRegardless()
             }
         } else { offDisplaySince=nil }
-        message("전체 화면에 PIP 표시 중")
+        message(parked?.ready == true ? "모든 데스크톱에 Edge PiP 표시 중" : "전체 화면에 PIP 표시 중")
     }
     private func fitted(_ frame: NSRect, to bounds: NSRect) -> NSRect {
         let factor = min(1, bounds.width / frame.width, bounds.height / frame.height)
@@ -511,6 +507,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         message("영상 창을 다시 연결하는 중")
     }
     func stopCapture() {
+        parked?.restore()
+        parked = nil
         guard let capture else { return }
         self.capture = nil
         panel.orderOut(nil)
@@ -519,7 +517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func reset() {
         toolbar?.orderOut(nil)
-        lastSourceWindowIDs.removeAll(); absentSince=nil; nativeVisibleSince=nil; offDisplaySince=nil
+        nativeVisibleSince=nil; offDisplaySince=nil
         stopCapture()
         source = nil; savedFrame = nil; presentMirror = false; retryAfter = 0
         message("Edge PIP 대기 중")
@@ -531,6 +529,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
         stopCapture()
     }
+}
+if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--hold-pip",
+   let pid = Int32(CommandLine.arguments[2]), let id = UInt32(CommandLine.arguments[3]) {
+    _ = fcntl(STDOUT_FILENO, F_SETNOSIGPIPE, 1)
+    exit(ParkedPiP.hold(pid: pid, id: id))
 }
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)

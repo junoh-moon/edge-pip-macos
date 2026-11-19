@@ -1,5 +1,5 @@
 (() => {
-  if (globalThis.__edgePipProtection?.connected()) return;
+  if (globalThis.__edgePipProtection?.isProtected && globalThis.__edgePipProtection.connected()) return;
   const protectedHosts = ["tving.com", "netflix.com", "disneyplus.com", "coupangplay.com", "wavve.com", "watcha.com"];
   const serviceHost = host => protectedHosts.some(domain => host === domain || host.endsWith("." + domain));
   const knownSite = serviceHost(location.hostname) || [...location.ancestorOrigins].some(origin => {
@@ -11,7 +11,7 @@
   let port, retry, sweep, leaving = false, preparing = true;
   const context = chrome.runtime;
   function connected() { try { return Boolean(context.id); } catch { return false; } }
-  globalThis.__edgePipProtection = {connected};
+  globalThis.__edgePipProtection = {connected, isProtected:eligible};
 
   function eligible(el) {
     return knownSite || encrypted.has(el) || Boolean(el.mediaKeys);

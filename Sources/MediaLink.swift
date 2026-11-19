@@ -7,6 +7,7 @@ struct MediaState {
     let paused: Bool
     let volume: Double
     let muted: Bool
+    let useNativePiP: Bool
     let previous, next, hasCaptions, captions, live: Bool
     let rate: Double
     let captionText: String
@@ -16,6 +17,7 @@ struct MediaState {
               let paused = row["paused"] as? Bool, let muted = row["muted"] as? Bool,
               let volume = row["volume"] as? Double, volume.isFinite else { return nil }
         self.time = time; self.paused = paused; self.volume = volume; self.muted = muted
+        useNativePiP = row["ordinaryPiP"] as? Bool != true
         previous = row["previous"] as? Bool ?? false
         next = row["next"] as? Bool ?? false
         hasCaptions = row["hasCaptions"] as? Bool ?? false
