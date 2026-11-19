@@ -44,6 +44,9 @@ extension NSScreen {
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     let view: VideoView
     private var clearBlank: DispatchWorkItem?
+    private var configuredPixels = CGSize.zero
+    private var wantedPixels = CGSize.zero
+    private var resizeTask: Task<Void, Never>?
     private(set) var lastFrameAt: TimeInterval = 0
 
     init(view: VideoView) {
@@ -63,18 +66,13 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             $0.windowID == source.id && $0.owningApplication?.bundleIdentifier == edgeIdentifier
                 && $0.owningApplication?.processID == source.pid && pipTitles.contains($0.title ?? "")
         }) else { throw CancellationError() }
-        let filter = SCContentFilter(desktopIndependentWindow: window)
-        let config = SCStreamConfiguration()
-        let scale = CGFloat(filter.pointPixelScale)
-        config.width = max(2, Int((window.frame.width * scale).rounded()))
-        config.height = max(2, Int((window.frame.height * scale).rounded()))
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        config.queueDepth = 3
-        config.showsCursor = false
-        config.capturesAudio = false
-        config.ignoreShadowsSingleWindow = true
-        config.captureResolution = .best
-        let stream = SCStream(filter: filter, configuration: config, delegate: self)
+        try await start(filter: SCContentFilter(desktopIndependentWindow: window))
+    }
+
+    @MainActor func start(filter: SCContentFilter) async throws {
+        configuredPixels = pixelSize(filter.contentRect.size, scale: CGFloat(filter.pointPixelScale))
+        wantedPixels = configuredPixels
+        let stream = SCStream(filter: filter, configuration: configuration(for: configuredPixels), delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .main)
         self.stream = stream
         starting = true
@@ -86,6 +84,50 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         starting = false
         if cancelled { try? await stream.stopCapture() }
+    }
+
+    private func pixelSize(_ points: CGSize, scale: CGFloat) -> CGSize {
+        CGSize(width: max(2, (points.width * scale).rounded()),
+               height: max(2, (points.height * scale).rounded()))
+    }
+
+    private func configuration(for pixels: CGSize) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = Int(pixels.width)
+        config.height = Int(pixels.height)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        config.queueDepth = 3
+        config.showsCursor = false
+        config.capturesAudio = false
+        config.ignoreShadowsSingleWindow = true
+        config.captureResolution = .best
+        return config
+    }
+
+    private func followSourceResolution(_ info: [SCStreamFrameInfo: Any], stream: SCStream) {
+        // screenRect is the original window in points, even when the current buffer is downscaled.
+        guard let raw = info[.screenRect] as? NSDictionary,
+              let rect = CGRect(dictionaryRepresentation: raw as CFDictionary),
+              !rect.isEmpty, !rect.isInfinite, let scale = info[.scaleFactor] as? CGFloat,
+              scale > 0, scale.isFinite else { return }
+        wantedPixels = pixelSize(rect.size, scale: scale)
+        guard wantedPixels != configuredPixels, resizeTask == nil else { return }
+        resizeTask = Task { @MainActor in
+            defer { resizeTask = nil }
+            do {
+                while !cancelled && wantedPixels != configuredPixels {
+                    // Coalesce live resize frames and apply only one configuration at a time.
+                    try await Task.sleep(for: .milliseconds(120))
+                    let target = wantedPixels
+                    guard !cancelled, target != configuredPixels else { return }
+                    if starting { continue }
+                    try await stream.updateConfiguration(configuration(for: target))
+                    configuredPixels = target
+                }
+            } catch {
+                if !cancelled { onStop?() }
+            }
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -107,6 +149,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         guard status == .complete, sample.imageBuffer != nil else { return }
+        followSourceResolution(info, stream: stream)
         clearBlank?.cancel()
         clearBlank=nil
         let renderer = view.video.sampleBufferRenderer
@@ -128,6 +171,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     func stop() {
         cancelled = true
+        resizeTask?.cancel()
         clearBlank?.cancel()
         onFrame = nil; onStop = nil
         if let stream, !starting { Task { try? await stream.stopCapture() } }
@@ -490,6 +534,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 }
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+#if CAPTURE_RESOLUTION_TEST
+Task { @MainActor in
+    do { try await testCaptureResolution(); exit(0) }
+    catch { print(error); exit(1) }
+}
+#else
 let delegate = AppDelegate()
 app.delegate = delegate
+#endif
 app.run()

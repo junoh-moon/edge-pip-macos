@@ -27,6 +27,16 @@ macOS 15 이상, Microsoft Edge, Xcode 명령줄 도구와 Python 3가 필요합
 
 기본 빌드는 임시 서명을 사용합니다. 빌드 사이에 권한을 유지하려면 키체인에 있는 동일한 코드 서명 인증서의 SHA-1 지문을 `EDGE_PIP_SIGNING_SHA1` 환경 변수에 설정한 뒤 빌드하십시오.
 
+## 해상도 테스트
+
+빌드한 뒤 다음 명령으로 테스트를 실행하십시오. 테스트 창을 확대하고 축소하면서 보조 창에 전달되는 프레임의 실제 픽셀 수와 축소 배율을 검사합니다.
+
+```sh
+xcrun swiftc -D CAPTURE_RESOLUTION_TEST Sources/*.swift Tests/CaptureResolution.swift -o build/test-resolution
+./build/test-resolution
+```
+
 ## 작업 이력
 
+- **1.4.1** — Edge 원래 PiP 창을 키우거나 배율이 다른 모니터로 옮길 때 캡처 해상도가 실제 픽셀 수를 따라가도록 수정했습니다. 보조 창도 현재 화면의 Retina 배율로 표시합니다.
 - **1.4** — 기본 PiP의 데스크톱·전체 화면 전환, 창 크기와 재생 조작, 공간 전환 중 마지막 프레임 유지, 보호 영상 자동 감지와 캡처 중지·재개를 포함한 첫 공개 소스입니다.

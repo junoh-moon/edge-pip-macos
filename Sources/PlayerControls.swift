@@ -106,10 +106,15 @@ final class VideoView: NSView {
         hud.isHidden=true
     }
     required init?(coder:NSCoder) { nil }
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsLayout = true
+    }
     override func layout() {
         super.layout()
         let w=bounds.width, h=bounds.height
         CATransaction.begin();CATransaction.setDisableActions(true)
+        if let window { video.contentsScale = window.backingScaleFactor }
         video.frame=bounds;hud.frame=bounds;shade.frame=CGRect(x:0,y:0,width:w,height:min(h,68))
         CATransaction.commit()
         closeButton.frame=CGRect(x:9,y:h-34,width:25,height:25)
