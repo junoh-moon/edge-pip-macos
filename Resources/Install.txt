@@ -1,0 +1,12 @@
+Edge PiP 설치 (macOS 15 이상)
+
+1. Edge PiP.app을 Applications에 복사하십시오.
+2. 같은 GitHub 릴리스의 Edge-PiP-Controls ZIP을 보관할 폴더에 풀고 Edge에서 edge://extensions 를 여십시오.
+   개발자 모드를 켜고 ‘압축 풀린 확장 로드’에서 manifest.json이 있는 폴더를 선택하십시오.
+3. 디스크 이미지를 연 상태에서 터미널로 아래 명령을 실행하십시오. Python 3가 필요합니다.
+   python3 "/Volumes/Edge PiP/Setup/register-host.py" "/Applications/Edge PiP.app/Contents/MacOS/EdgePiPRelay"
+4. 응용 프로그램 폴더에서 Edge PiP를 실행하고 화면 기록과 손쉬운 사용 권한을 허용하십시오.
+   Edge 기본 PiP 버튼을 누르면 일반 영상은 보조 창에, 보호 영상은 Edge 원래 창에 표시됩니다.
+
+공개 빌드는 임시 서명을 사용하며 Apple 공증을 받지 않았습니다.
+기존에 개인 인증서로 서명해 사용하던 앱을 공개 빌드로 교체하면 macOS에서 권한을 다시 요청할 수 있습니다.

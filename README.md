@@ -8,6 +8,18 @@ Microsoft Edge에서 기본 화면 속 화면(PiP) 버튼을 누르면 다른 �
 - 포인터를 올리면 크기 조절, 닫기, 원래 탭으로 돌아가기가 가능합니다. 함께 제공되는 Edge 확장을 사용하면 재생, 탐색, 음량 및 사이트가 지원하는 이전·다음 영상도 조절할 수 있습니다.
 - 티빙 등 보호 영상이 재생되는 동안에는 보조 앱이 화면 캡처를 멈춥니다. 보호 영상의 기본 PiP 버튼은 Edge 원래 창을 표시합니다. 마지막 보호 영상의 재생을 끝내면 일반 영상의 PiP 표시가 재개됩니다. 영상이나 소리를 파일에 저장하지 않습니다.
 
+## 다운로드와 릴리스
+
+[GitHub Releases](https://github.com/junoh-moon/edge-pip-macos/releases/latest)에서 같은 버전의 Mac용 DMG와 Edge 확장 ZIP을 받으십시오. DMG에 있는 설치 안내를 따르십시오. Mac 앱은 Apple Silicon과 Intel을 지원합니다. 공개 빌드는 임시 서명을 사용하며 Apple 공증을 받지 않았습니다.
+
+`main`에 앱, 확장, 리소스 또는 빌드 스크립트 변경이 올라오면 GitHub Actions가 두 파일과 SHA-256 체크섬을 한 릴리스로 발행합니다. 버전은 앱 버전의 앞 두 숫자와 해당 커밋까지 `main`의 첫 번째 부모를 따라 센 커밋 수로 정합니다. 태그와 두 패키지 내부 버전이 일치합니다. 같은 커밋의 재실행은 기존 릴리스를 유지합니다.
+
+```sh
+python3 scripts/release-version.py
+python3 scripts/package-release.py
+./scripts/publish-release.sh
+```
+
 ## 빌드와 설치
 
 macOS 15 이상, Microsoft Edge, Xcode 명령줄 도구와 Python 3가 필요합니다. 저장소 루트에서 실행하십시오.

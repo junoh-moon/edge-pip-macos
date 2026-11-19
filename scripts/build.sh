@@ -1,16 +1,32 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-app="build/Edge PiP.app"
+build_dir="${EDGE_PIP_BUILD_DIR:-build}"
+app="$build_dir/Edge PiP.app"
 bin="$app/Contents/MacOS"
 mkdir -p "$bin" "$app/Contents/Resources"
 cp Resources/Info.plist "$app/Contents/"
 cp Resources/{AppIcon.icns,MenuBarTemplate.pdf,PiPTitles.txt} "$app/Contents/Resources/"
 
-target="$(uname -m)-apple-macos15.0"
-xcrun swiftc -target "$target" -Osize Sources/*.swift -o "$bin/EdgePiP"
-for helper in EdgePiPRelay EdgePiPGuard; do
-    xcrun clang -target "$target" -Os "Sources/$helper.c" -o "$bin/$helper"
+if [[ -n "${EDGE_PIP_RELEASE_VERSION:-}" ]]; then
+    plutil -replace CFBundleShortVersionString -string "$EDGE_PIP_RELEASE_VERSION" "$app/Contents/Info.plist"
+    plutil -replace CFBundleVersion -string "${EDGE_PIP_BUILD_NUMBER:?}" "$app/Contents/Info.plist"
+fi
+
+read -r -a archs <<< "${EDGE_PIP_ARCHS:-$(uname -m)}"
+for arch in "${archs[@]}"; do
+    target="$arch-apple-macos15.0"
+    slice="$build_dir/slices/$arch"
+    mkdir -p "$slice"
+    xcrun swiftc -target "$target" -Osize Sources/*.swift -o "$slice/EdgePiP"
+    for helper in EdgePiPRelay EdgePiPGuard; do
+        xcrun clang -target "$target" -Os "Sources/$helper.c" -o "$slice/$helper"
+    done
+done
+for name in EdgePiP EdgePiPRelay EdgePiPGuard; do
+    slices=()
+    for arch in "${archs[@]}"; do slices+=("$build_dir/slices/$arch/$name"); done
+    xcrun lipo -create "${slices[@]}" -output "$bin/$name"
 done
 
 sign() {
